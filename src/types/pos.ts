@@ -6,6 +6,7 @@ export interface ParsedTransaction {
   item: string;
   amountXOF: number;
   amountSats: number;
+  rawTranscript?: string;
   customerNote?: string;
   timestamp: number;
 }
