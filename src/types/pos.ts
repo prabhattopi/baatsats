@@ -20,6 +20,28 @@ export interface FxRateData {
   updatedAt: number;
 }
 
+export interface LightningInvoiceData {
+  bolt11: string;
+  verifyUrl?: string | null;
+  lightningAddress: string;
+  amountSats: number;
+  expiresAt: number;
+}
+
+export interface SettledReceipt {
+  id: string;
+  item: string;
+  quantity: number;
+  amountXOF: number;
+  amountSats: number;
+  lightningAddress: string;
+  nostrEventId?: string;
+  nostrNoteId?: string;
+  nostrPubkey?: string;
+  relaysPublished: number;
+  settledAt: number;
+}
+
 export interface TranslationDictionary {
   appName: string;
   marketSubtitle: string;
@@ -34,4 +56,11 @@ export interface TranslationDictionary {
   cancel: string;
   quickAmounts: string;
   currency: string;
+  scanToPay: string;
+  waitingPayment: string;
+  paymentConfirmed: string;
+  copyInvoice: string;
+  copied: string;
+  simulatePay: string;
+  newSale: string;
 }

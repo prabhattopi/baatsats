@@ -12,15 +12,26 @@ import {
   Pencil,
   Check,
   Sparkles,
+  Loader2,
+  Wallet,
 } from 'lucide-react';
-import { Language, VoiceState, ParsedTransaction, FxRateData } from '@/types/pos';
+import {
+  Language,
+  VoiceState,
+  ParsedTransaction,
+  FxRateData,
+  LightningInvoiceData,
+} from '@/types/pos';
 import { translations } from '@/utils/i18n';
 import { soundEffects } from '@/utils/audioFeedback';
 import { useAudioRecorder } from '@/hooks/useAudioRecorder';
+import { getOrCreateMerchantNostrIdentity } from '@/utils/nostrReceipt';
 import LanguageSelector from '@/components/LanguageSelector';
 import VoiceTriggerButton from '@/components/VoiceTriggerButton';
+import LightningInvoiceModal from '@/components/LightningInvoiceModal';
 
 const DEFAULT_SATS_PER_XOF = 1.71;
+const LN_ADDRESS_STORAGE_KEY = 'baatsats_merchant_ln_address';
 
 export default function MerchantTerminal() {
   const [lang, setLang] = useState<Language>('wo');
@@ -33,6 +44,14 @@ export default function MerchantTerminal() {
 
   const [isEditingAmount, setIsEditingAmount] = useState(false);
   const [editAmountInput, setEditAmountInput] = useState('');
+
+  // Lightning & Nostr Wallet State
+  const [lightningAddress, setLightningAddress] = useState('hello@getalby.com');
+  const [merchantNpub, setMerchantNpub] = useState('');
+  const [showWalletConfig, setShowWalletConfig] = useState(false);
+  const [lnInputDraft, setLnInputDraft] = useState('');
+  const [isGeneratingInvoice, setIsGeneratingInvoice] = useState(false);
+  const [activeInvoice, setActiveInvoice] = useState<LightningInvoiceData | null>(null);
 
   const {
     isRecording,
@@ -61,6 +80,16 @@ export default function MerchantTerminal() {
         }
       })
       .catch(() => {});
+
+    try {
+      const savedLn = window.localStorage.getItem(LN_ADDRESS_STORAGE_KEY);
+      if (savedLn) setLightningAddress(savedLn);
+      const id = getOrCreateMerchantNostrIdentity();
+      setMerchantNpub(id.npub);
+    } catch {
+      // Storage fallback
+    }
+
     return () => {
       active = false;
     };
@@ -145,9 +174,42 @@ export default function MerchantTerminal() {
     }
   };
 
+  const handleGenerateLightningInvoice = async () => {
+    if (!transaction || transaction.amountSats < 1 || isGeneratingInvoice) return;
+    setIsGeneratingInvoice(true);
+    setStatusMessage(null);
+
+    try {
+      const res = await fetch('/api/lightning/invoice', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          amountSats: transaction.amountSats,
+          memo: `BaatSats: ${transaction.quantity}x ${transaction.item} (${transaction.amountXOF} FCFA)`,
+          lightningAddress,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.bolt11) {
+        throw new Error(data.error || 'Failed to create Lightning invoice');
+      }
+
+      soundEffects.playMicStart();
+      setActiveInvoice(data as LightningInvoiceData);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Lightning network error';
+      setStatusMessage(msg);
+      soundEffects.playCancel();
+    } finally {
+      setIsGeneratingInvoice(false);
+    }
+  };
+
   const handleReset = () => {
     soundEffects.playCancel();
     setTransaction(null);
+    setActiveInvoice(null);
     setStatusMessage(null);
     setIsEditingAmount(false);
     clearError();
@@ -164,6 +226,7 @@ export default function MerchantTerminal() {
       confidence: 'high',
       timestamp: Date.now(),
     });
+    setStatusMessage(null);
     setIsEditingAmount(false);
     setVoiceState('ready');
     soundEffects.playSuccess();
@@ -194,6 +257,20 @@ export default function MerchantTerminal() {
     setCardAmount(validXOF);
   };
 
+  const saveWalletSettings = () => {
+    const clean = lnInputDraft.trim().toLowerCase();
+    if (clean.includes('@') && clean.includes('.')) {
+      setLightningAddress(clean);
+      try {
+        window.localStorage.setItem(LN_ADDRESS_STORAGE_KEY, clean);
+      } catch {
+        // Ignore
+      }
+    }
+    setShowWalletConfig(false);
+    soundEffects.playSuccess();
+  };
+
   const activeError = statusMessage || micError;
 
   return (
@@ -218,17 +295,55 @@ export default function MerchantTerminal() {
         <LanguageSelector currentLang={lang} onSelect={setLang} />
       </header>
 
-      {/* Live Oracle & Lightning Status Bar */}
+      {/* Live Oracle & Lightning Wallet Bar */}
       <div className="w-full flex items-center justify-between px-3 py-1.5 rounded-lg bg-slate-900/60 border border-slate-800/80 my-3">
         <div className="flex items-center gap-1.5 text-[11px] text-slate-300 font-mono">
           <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
           <span>1k F ≈ {Math.round(1000 * satsPerXOF).toLocaleString()} sats</span>
         </div>
-        <div className="text-[11px] font-mono text-amber-400 flex items-center gap-1">
-          <Wifi className="w-3 h-3" />
-          <span>{fxRate ? fxRate.source : 'Syncing FX...'}</span>
-        </div>
+        <button
+          onClick={() => {
+            setLnInputDraft(lightningAddress);
+            setShowWalletConfig((prev) => !prev);
+          }}
+          className="text-[11px] font-mono text-amber-400 hover:text-amber-300 flex items-center gap-1"
+          title="Configure Lightning Address & Nostr Identity"
+        >
+          <Wallet className="w-3 h-3" />
+          <span className="max-w-[130px] truncate">{lightningAddress}</span>
+        </button>
       </div>
+
+      {/* Collapsible Merchant Lightning + Nostr Identity Drawer */}
+      {showWalletConfig && (
+        <div className="w-full mb-3 p-3.5 rounded-2xl bg-slate-900 border border-amber-500/40 space-y-2.5 text-xs animate-in fade-in duration-150">
+          <div className="flex items-center justify-between">
+            <span className="font-bold text-amber-400 flex items-center gap-1.5">
+              <Wifi className="w-3.5 h-3.5" /> Merchant Receiving Wallet (LUD-16)
+            </span>
+          </div>
+          <div className="flex gap-2">
+            <input
+              type="email"
+              value={lnInputDraft}
+              onChange={(e) => setLnInputDraft(e.target.value)}
+              placeholder="merchant@getalby.com"
+              className="flex-1 px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-slate-100 font-mono text-xs focus:outline-none focus:border-amber-500"
+            />
+            <button
+              onClick={saveWalletSettings}
+              className="px-3 py-1.5 rounded-lg bg-amber-500 text-slate-950 font-bold"
+            >
+              Save
+            </button>
+          </div>
+          {merchantNpub && (
+            <p className="text-[10px] font-mono text-slate-400 truncate">
+              Nostr ID: <span className="text-purple-400">{merchantNpub}</span>
+            </p>
+          )}
+        </div>
+      )}
 
       {/* Center Stage: Voice Trigger or Parsed Invoice Card */}
       <div className="flex-1 flex flex-col items-center justify-center">
@@ -353,7 +468,6 @@ export default function MerchantTerminal() {
                 </div>
               )}
 
-              {/* If no price was spoken, offer clean 1-tap amount chips instead of a fake 1000 */}
               {transaction.amountXOF === 0 && !isEditingAmount ? (
                 <div className="mt-2 space-y-2">
                   <p className="text-[11px] text-amber-300/90">{t.noAmountHint}</p>
@@ -379,18 +493,29 @@ export default function MerchantTerminal() {
               )}
             </div>
 
-            {/* Action Button */}
+            {statusMessage && (
+              <div className="p-2.5 rounded-xl bg-rose-950/80 border border-rose-500/50 text-xs text-rose-200 text-center">
+                {statusMessage}
+              </div>
+            )}
+
+            {/* Action Button: Generate Real BOLT11 Lightning Invoice */}
             <button
-              disabled={transaction.amountXOF <= 0}
-              onClick={() =>
-                alert(
-                  `Phase 5 will generate a real Bolt11 Lightning Invoice for ${transaction.amountSats.toLocaleString()} Sats and verify payment via Nostr!`
-                )
-              }
+              disabled={transaction.amountXOF <= 0 || isGeneratingInvoice}
+              onClick={handleGenerateLightningInvoice}
               className="w-full py-4 rounded-2xl bg-amber-500 hover:bg-amber-400 disabled:bg-slate-800 disabled:text-slate-500 text-slate-950 font-black text-base flex items-center justify-center gap-2 shadow-lg shadow-amber-500/30 disabled:shadow-none transition-transform active:scale-95"
             >
-              <span>{t.generateInvoice}</span>
-              <ArrowRight className="w-5 h-5" />
+              {isGeneratingInvoice ? (
+                <>
+                  <Loader2 className="w-5 h-5 animate-spin" />
+                  <span>BOLT11...</span>
+                </>
+              ) : (
+                <>
+                  <span>{t.generateInvoice}</span>
+                  <ArrowRight className="w-5 h-5" />
+                </>
+              )}
             </button>
           </div>
         )}
@@ -418,6 +543,21 @@ export default function MerchantTerminal() {
           ))}
         </div>
       </footer>
+
+      {/* Real BOLT11 Lightning QR & Nostr Receipt Settlement Modal */}
+      {activeInvoice && transaction && (
+        <LightningInvoiceModal
+          transaction={transaction}
+          invoice={activeInvoice}
+          t={t}
+          onClose={() => setActiveInvoice(null)}
+          onSettled={() => {
+            setActiveInvoice(null);
+            setTransaction(null);
+            setVoiceState('idle');
+          }}
+        />
+      )}
     </main>
   );
 }
