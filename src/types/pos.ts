@@ -39,6 +39,7 @@ export interface SettledReceipt {
   nostrNoteId?: string;
   nostrPubkey?: string;
   relaysPublished: number;
+  syncStatus: 'synced' | 'offline-queued';
   settledAt: number;
 }
 
@@ -63,4 +64,8 @@ export interface TranslationDictionary {
   copied: string;
   simulatePay: string;
   newSale: string;
+  todaysSales: string;
+  verifyOnNostr: string;
+  exportCreditProof: string;
+  offlineSaved: string;
 }

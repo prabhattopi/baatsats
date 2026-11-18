@@ -22,6 +22,10 @@ export const translations: Record<Language, TranslationDictionary> = {
     copied: 'Copié na!',
     simulatePay: 'Test Fey (Demo Settlement)',
     newSale: 'Jaay bu bees',
+    todaysSales: 'Koom-koomu tey',
+    verifyOnNostr: 'Séétal ci Nostr (njump.me)',
+    exportCreditProof: 'Télécharger Preuve Micro-Crédit',
+    offlineSaved: 'Denc nañu ko offline — dina sync bu réseau ñëwee',
   },
   fr: {
     appName: 'BaatSats',
@@ -44,6 +48,10 @@ export const translations: Record<Language, TranslationDictionary> = {
     copied: 'Copié !',
     simulatePay: 'Simuler Paiement (Démo)',
     newSale: 'Nouvelle Vente',
+    todaysSales: 'Ventes du jour',
+    verifyOnNostr: 'Vérifier sur Nostr (njump.me)',
+    exportCreditProof: 'Exporter Preuve Micro-Crédit',
+    offlineSaved: 'Enregistré hors-ligne — sync auto au retour réseau',
   },
   en: {
     appName: 'BaatSats',
@@ -66,5 +74,9 @@ export const translations: Record<Language, TranslationDictionary> = {
     copied: 'Copied!',
     simulatePay: 'Simulate Wallet Payment (Demo)',
     newSale: 'New Sale',
+    todaysSales: "Today's Sales",
+    verifyOnNostr: 'Verify Live on Nostr (njump.me)',
+    exportCreditProof: 'Download Micro-Loan Credit Proof',
+    offlineSaved: 'Saved offline — will auto-sync when online',
   },
 };

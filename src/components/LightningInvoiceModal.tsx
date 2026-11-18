@@ -12,6 +12,8 @@ import {
   ShieldCheck,
   Radio,
   Sparkles,
+  ExternalLink,
+  CloudOff,
 } from 'lucide-react';
 import type {
   ParsedTransaction,
@@ -20,7 +22,7 @@ import type {
   TranslationDictionary,
 } from '@/types/pos';
 import { soundEffects } from '@/utils/audioFeedback';
-import { publishNostrSaleReceipt } from '@/utils/nostrReceipt';
+import { publishNostrSaleReceipt, getOrCreateMerchantNostrIdentity } from '@/utils/nostrReceipt';
 
 interface Props {
   transaction: ParsedTransaction;
@@ -47,6 +49,27 @@ export default function LightningInvoiceModal({
       setIsSettling(true);
       soundEffects.playSuccess();
 
+      const isOffline = typeof navigator !== 'undefined' && !navigator.onLine;
+
+      if (isOffline) {
+        const identity = getOrCreateMerchantNostrIdentity();
+        const offlineReceipt: SettledReceipt = {
+          id: `offline_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+          item: transaction.item,
+          quantity: transaction.quantity,
+          amountXOF: transaction.amountXOF,
+          amountSats: transaction.amountSats,
+          lightningAddress: invoice.lightningAddress,
+          nostrPubkey: identity.npub,
+          relaysPublished: 0,
+          syncStatus: 'offline-queued',
+          settledAt: Date.now(),
+        };
+        setReceipt(offlineReceipt);
+        setIsSettling(false);
+        return;
+      }
+
       const nostrProof = await publishNostrSaleReceipt({
         transaction,
         lightningAddress: invoice.lightningAddress,
@@ -55,7 +78,7 @@ export default function LightningInvoiceModal({
       });
 
       const completedReceipt: SettledReceipt = {
-        id: nostrProof.eventId.slice(0, 12),
+        id: nostrProof.eventId.slice(0, 16),
         item: transaction.item,
         quantity: transaction.quantity,
         amountXOF: transaction.amountXOF,
@@ -65,6 +88,7 @@ export default function LightningInvoiceModal({
         nostrNoteId: nostrProof.noteId,
         nostrPubkey: nostrProof.pubkey,
         relaysPublished: nostrProof.relaysPublished,
+        syncStatus: nostrProof.relaysPublished > 0 ? 'synced' : 'offline-queued',
         settledAt: Date.now(),
       };
 
@@ -74,11 +98,12 @@ export default function LightningInvoiceModal({
     [isSettling, receipt, transaction, invoice]
   );
 
-  // Poll LUD-21 verify endpoint every 3 seconds if supported by Lightning provider
+  // Poll LUD-21 verify endpoint every 3 seconds if online
   useEffect(() => {
     if (!invoice.verifyUrl || receipt || isSettling) return;
 
     const interval = setInterval(async () => {
+      if (typeof navigator !== 'undefined' && !navigator.onLine) return;
       try {
         const res = await fetch('/api/lightning/verify', {
           method: 'POST',
@@ -133,7 +158,6 @@ export default function LightningInvoiceModal({
 
         {!receipt ? (
           <>
-            {/* Amount Summary */}
             <div className="text-center">
               <p className="text-xs text-slate-400">
                 {transaction.quantity > 1 ? `${transaction.quantity}× ` : ''}
@@ -148,7 +172,6 @@ export default function LightningInvoiceModal({
               </p>
             </div>
 
-            {/* Locally Rendered High-Contrast QR Code (Zero External API Leak) */}
             <div className="flex flex-col items-center justify-center bg-white p-4 rounded-2xl mx-auto w-fit shadow-inner">
               <QRCodeSVG
                 value={invoice.bolt11.toUpperCase()}
@@ -161,7 +184,6 @@ export default function LightningInvoiceModal({
 
             <p className="text-center text-xs text-slate-300 font-medium">{t.scanToPay}</p>
 
-            {/* Copy BOLT11 String */}
             <button
               onClick={handleCopyBolt11}
               className="w-full py-2.5 px-3 rounded-xl bg-slate-950 border border-slate-800 hover:border-amber-500/50 text-xs font-mono text-slate-300 flex items-center justify-between gap-2"
@@ -173,13 +195,11 @@ export default function LightningInvoiceModal({
               </span>
             </button>
 
-            {/* Live Waiting Indicator */}
             <div className="flex items-center justify-center gap-2 text-xs text-amber-400 py-1">
               <Loader2 className="w-3.5 h-3.5 animate-spin" />
               <span>{t.waitingPayment}</span>
             </div>
 
-            {/* Instant Demo Settlement Trigger for Judges / Offline Testing */}
             <button
               onClick={() => finalizeSettlement('demo-settled')}
               disabled={isSettling}
@@ -199,7 +219,7 @@ export default function LightningInvoiceModal({
             </button>
           </>
         ) : (
-          /* Settled Confirmation + Nostr Cryptographic Proof */
+          /* Settled Confirmation + Direct Nostr Explorer Proof */
           <div className="space-y-4 text-center py-2 animate-in zoom-in-95 duration-200">
             <div className="w-16 h-16 rounded-full bg-emerald-500/20 border-2 border-emerald-500 flex items-center justify-center mx-auto text-emerald-400">
               <CheckCircle2 className="w-10 h-10" />
@@ -212,27 +232,45 @@ export default function LightningInvoiceModal({
               </p>
             </div>
 
-            {/* Nostr Cryptographic Receipt Proof Box */}
             <div className="p-3 rounded-2xl bg-slate-950 border border-slate-800 text-left space-y-2 text-xs">
               <div className="flex items-center justify-between text-purple-400 font-bold">
                 <span className="flex items-center gap-1.5">
-                  <ShieldCheck className="w-4 h-4" />
-                  Nostr Signed Receipt
+                  {receipt.syncStatus === 'synced' ? (
+                    <>
+                      <ShieldCheck className="w-4 h-4" />
+                      Nostr Signed Receipt
+                    </>
+                  ) : (
+                    <>
+                      <CloudOff className="w-4 h-4 text-amber-400" />
+                      <span className="text-amber-300">Offline Queued</span>
+                    </>
+                  )}
                 </span>
                 <span className="flex items-center gap-1 text-[10px] font-mono bg-purple-500/10 px-2 py-0.5 rounded-full">
                   <Radio className="w-3 h-3" />
                   {receipt.relaysPublished}/3 Relays
                 </span>
               </div>
-              {receipt.nostrNoteId && (
+
+              {receipt.nostrNoteId ? (
                 <p className="font-mono text-[11px] text-slate-400 break-all">
                   Event: <span className="text-slate-200">{receipt.nostrNoteId}</span>
                 </p>
+              ) : (
+                <p className="text-[11px] text-amber-300/90">{t.offlineSaved}</p>
               )}
-              {receipt.nostrPubkey && (
-                <p className="font-mono text-[11px] text-slate-400 truncate">
-                  Merchant: <span className="text-slate-300">{receipt.nostrPubkey}</span>
-                </p>
+
+              {receipt.nostrNoteId && receipt.relaysPublished > 0 && (
+                <a
+                  href={`https://njump.me/${receipt.nostrNoteId}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="mt-1 w-full py-2 px-3 rounded-xl bg-purple-500/15 hover:bg-purple-500/25 border border-purple-500/40 text-purple-300 font-bold text-xs flex items-center justify-center gap-1.5 transition-colors"
+                >
+                  <span>{t.verifyOnNostr}</span>
+                  <ExternalLink className="w-3.5 h-3.5" />
+                </a>
               )}
             </div>
 

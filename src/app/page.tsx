@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
   Wifi,
+  WifiOff,
   ArrowRight,
   RefreshCw,
   Zap,
@@ -14,6 +15,7 @@ import {
   Sparkles,
   Loader2,
   Wallet,
+  TrendingUp,
 } from 'lucide-react';
 import {
   Language,
@@ -21,15 +23,25 @@ import {
   ParsedTransaction,
   FxRateData,
   LightningInvoiceData,
+  SettledReceipt,
 } from '@/types/pos';
 import { translations } from '@/utils/i18n';
 import { soundEffects } from '@/utils/audioFeedback';
 import { useAudioRecorder } from '@/hooks/useAudioRecorder';
-import { getOrCreateMerchantNostrIdentity } from '@/utils/nostrReceipt';
 import LanguageSelector from '@/components/LanguageSelector';
 import VoiceTriggerButton from '@/components/VoiceTriggerButton';
 import LightningInvoiceModal from '@/components/LightningInvoiceModal';
-
+import SalesLedgerDrawer from '@/components/SalesLedgerDrawer';
+import {
+  getOrCreateMerchantNostrIdentity,
+  ensureMerchantNostrProfile,
+} from '@/utils/nostrReceipt';
+import {
+  getAllReceipts,
+  saveReceiptToLedger,
+  syncOfflineQueuedReceipts,
+  hydrateLedgerFromNostr,
+} from '@/utils/salesLedger';
 const DEFAULT_SATS_PER_XOF = 1.71;
 const LN_ADDRESS_STORAGE_KEY = 'baatsats_merchant_ln_address';
 
@@ -41,6 +53,7 @@ export default function MerchantTerminal() {
   const [transaction, setTransaction] = useState<ParsedTransaction | null>(null);
 
   const [fxRate, setFxRate] = useState<FxRateData | null>(null);
+  const [isOnline, setIsOnline] = useState<boolean>(true);
 
   const [isEditingAmount, setIsEditingAmount] = useState(false);
   const [editAmountInput, setEditAmountInput] = useState('');
@@ -52,6 +65,11 @@ export default function MerchantTerminal() {
   const [lnInputDraft, setLnInputDraft] = useState('');
   const [isGeneratingInvoice, setIsGeneratingInvoice] = useState(false);
   const [activeInvoice, setActiveInvoice] = useState<LightningInvoiceData | null>(null);
+
+  // Offline-First Sales Ledger State
+  const [receipts, setReceipts] = useState<SettledReceipt[]>([]);
+  const [showLedger, setShowLedger] = useState(false);
+  const [isSyncingLedger, setIsSyncingLedger] = useState(false);
 
   const {
     isRecording,
@@ -70,8 +88,28 @@ export default function MerchantTerminal() {
     [satsPerXOF]
   );
 
+  const refreshLedger = useCallback(async () => {
+    const items = await getAllReceipts();
+    setReceipts(items);
+  }, []);
+
+  const handleSyncOfflineQueue = useCallback(async () => {
+    setIsSyncingLedger(true);
+    try {
+      await syncOfflineQueuedReceipts();
+      await refreshLedger();
+    } finally {
+      setIsSyncingLedger(false);
+    }
+  }, [refreshLedger]);
+
   useEffect(() => {
     let active = true;
+
+    if (typeof navigator !== 'undefined') {
+      setIsOnline(navigator.onLine);
+    }
+
     fetch('/api/rates')
       .then((res) => res.json())
       .then((data: FxRateData) => {
@@ -90,10 +128,35 @@ export default function MerchantTerminal() {
       // Storage fallback
     }
 
+    refreshLedger();
+    const savedAddress =
+      (typeof window !== 'undefined' && window.localStorage.getItem(LN_ADDRESS_STORAGE_KEY)) ||
+      'hello@getalby.com';
+
+    refreshLedger().then(() => {
+      hydrateLedgerFromNostr(savedAddress).then((imported) => {
+        if (imported > 0) {
+          refreshLedger();
+        }
+      });
+      ensureMerchantNostrProfile(savedAddress);
+    });
+
+    const onOnline = () => {
+      setIsOnline(true);
+      handleSyncOfflineQueue();
+    };
+    const onOffline = () => setIsOnline(false);
+
+    window.addEventListener('online', onOnline);
+    window.addEventListener('offline', onOffline);
+
     return () => {
       active = false;
+      window.removeEventListener('online', onOnline);
+      window.removeEventListener('offline', onOffline);
     };
-  }, []);
+  }, [refreshLedger, handleSyncOfflineQueue]);
 
   const handleVoiceToggle = async () => {
     if (!isRecording && (voiceState === 'idle' || voiceState === 'error')) {
@@ -206,6 +269,14 @@ export default function MerchantTerminal() {
     }
   };
 
+  const handleReceiptSettled = async (newReceipt: SettledReceipt) => {
+    await saveReceiptToLedger(newReceipt);
+    await refreshLedger();
+    setActiveInvoice(null);
+    setTransaction(null);
+    setVoiceState('idle');
+  };
+
   const handleReset = () => {
     soundEffects.playCancel();
     setTransaction(null);
@@ -272,6 +343,8 @@ export default function MerchantTerminal() {
   };
 
   const activeError = statusMessage || micError;
+  const totalEarnedSats = receipts.reduce((sum, r) => sum + r.amountSats, 0);
+  const totalEarnedXOF = receipts.reduce((sum, r) => sum + r.amountXOF, 0);
 
   return (
     <main className="flex min-h-screen flex-col justify-between p-4 max-w-md mx-auto select-none">
@@ -296,9 +369,13 @@ export default function MerchantTerminal() {
       </header>
 
       {/* Live Oracle & Lightning Wallet Bar */}
-      <div className="w-full flex items-center justify-between px-3 py-1.5 rounded-lg bg-slate-900/60 border border-slate-800/80 my-3">
+      <div className="w-full flex items-center justify-between px-3 py-1.5 rounded-lg bg-slate-900/60 border border-slate-800/80 mt-2.5">
         <div className="flex items-center gap-1.5 text-[11px] text-slate-300 font-mono">
-          <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+          {isOnline ? (
+            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+          ) : (
+            <WifiOff className="w-3.5 h-3.5 text-amber-400" />
+          )}
           <span>1k F ≈ {Math.round(1000 * satsPerXOF).toLocaleString()} sats</span>
         </div>
         <button
@@ -314,9 +391,26 @@ export default function MerchantTerminal() {
         </button>
       </div>
 
+      {/* Live Cumulative Earnings & Ledger Trigger Pill */}
+      <button
+        onClick={() => setShowLedger(true)}
+        className="w-full flex items-center justify-between px-3 py-2 rounded-xl bg-emerald-950/35 hover:bg-emerald-950/55 border border-emerald-500/30 my-2 transition-colors"
+      >
+        <div className="flex items-center gap-2 text-xs">
+          <TrendingUp className="w-4 h-4 text-emerald-400 shrink-0" />
+          <span className="font-bold text-slate-200">{t.todaysSales}:</span>
+          <span className="font-mono font-black text-emerald-400">
+            +{totalEarnedSats.toLocaleString()} Sats
+          </span>
+        </div>
+        <span className="text-[11px] font-mono text-slate-300 bg-slate-900/80 px-2 py-0.5 rounded-md border border-slate-800">
+          {totalEarnedXOF.toLocaleString()} F ({receipts.length})
+        </span>
+      </button>
+
       {/* Collapsible Merchant Lightning + Nostr Identity Drawer */}
       {showWalletConfig && (
-        <div className="w-full mb-3 p-3.5 rounded-2xl bg-slate-900 border border-amber-500/40 space-y-2.5 text-xs animate-in fade-in duration-150">
+        <div className="w-full mb-2 p-3.5 rounded-2xl bg-slate-900 border border-amber-500/40 space-y-2.5 text-xs animate-in fade-in duration-150">
           <div className="flex items-center justify-between">
             <span className="font-bold text-amber-400 flex items-center gap-1.5">
               <Wifi className="w-3.5 h-3.5" /> Merchant Receiving Wallet (LUD-16)
@@ -551,11 +645,19 @@ export default function MerchantTerminal() {
           invoice={activeInvoice}
           t={t}
           onClose={() => setActiveInvoice(null)}
-          onSettled={() => {
-            setActiveInvoice(null);
-            setTransaction(null);
-            setVoiceState('idle');
-          }}
+          onSettled={handleReceiptSettled}
+        />
+      )}
+
+      {/* Offline-First Sales Ledger & Micro-Loan Credit Passport Drawer */}
+      {showLedger && (
+        <SalesLedgerDrawer
+          receipts={receipts}
+          merchantNpub={merchantNpub}
+          t={t}
+          onClose={() => setShowLedger(false)}
+          onSyncNow={handleSyncOfflineQueue}
+          isSyncing={isSyncingLedger}
         />
       )}
     </main>
