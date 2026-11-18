@@ -1,22 +1,38 @@
 'use client';
 
-import { useState } from 'react';
-import { Wifi, ArrowRight, RefreshCw, Zap, ShoppingBag, MessageSquareQuote, AlertTriangle } from 'lucide-react';
-import { Language, VoiceState, ParsedTransaction } from '@/types/pos';
+import { useState, useEffect, useCallback } from 'react';
+import {
+  Wifi,
+  ArrowRight,
+  RefreshCw,
+  Zap,
+  ShoppingBag,
+  MessageSquareQuote,
+  AlertTriangle,
+  Pencil,
+  Check,
+  Sparkles,
+} from 'lucide-react';
+import { Language, VoiceState, ParsedTransaction, FxRateData } from '@/types/pos';
 import { translations } from '@/utils/i18n';
 import { soundEffects } from '@/utils/audioFeedback';
 import { useAudioRecorder } from '@/hooks/useAudioRecorder';
 import LanguageSelector from '@/components/LanguageSelector';
 import VoiceTriggerButton from '@/components/VoiceTriggerButton';
 
-// Baseline rate (Phase 4 will replace with live BTC/XOF oracle + LLaMA intent parsing)
-const FCFA_TO_SATS_RATE = 1.71;
+const DEFAULT_SATS_PER_XOF = 1.71;
 
 export default function MerchantTerminal() {
   const [lang, setLang] = useState<Language>('wo');
   const [voiceState, setVoiceState] = useState<VoiceState>('idle');
+  const [processingStep, setProcessingStep] = useState<string>('');
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [transaction, setTransaction] = useState<ParsedTransaction | null>(null);
+
+  const [fxRate, setFxRate] = useState<FxRateData | null>(null);
+
+  const [isEditingAmount, setIsEditingAmount] = useState(false);
+  const [editAmountInput, setEditAmountInput] = useState('');
 
   const {
     isRecording,
@@ -28,19 +44,27 @@ export default function MerchantTerminal() {
   } = useAudioRecorder();
 
   const t = translations[lang];
+  const satsPerXOF = fxRate?.satsPerXOF ?? DEFAULT_SATS_PER_XOF;
 
-  // Quick numeric preview for Phase 3 (Phase 4 LLaMA-3.3-70B will parse written French/Wolof numbers like "trois mille cinq cents")
-  const extractQuickPreview = (transcript: string): ParsedTransaction => {
-    const numMatch = transcript.replace(/,/g, '').match(/\b(\d{2,7})\b/);
-    const amountXOF = numMatch ? parseInt(numMatch[1], 10) : 1000;
-    return {
-      item: transcript.slice(0, 42) + (transcript.length > 42 ? '...' : ''),
-      amountXOF,
-      amountSats: Math.round(amountXOF * FCFA_TO_SATS_RATE),
-      rawTranscript: transcript,
-      timestamp: Date.now(),
+  const convertXofToSats = useCallback(
+    (xof: number) => (xof > 0 ? Math.max(1, Math.round(xof * satsPerXOF)) : 0),
+    [satsPerXOF]
+  );
+
+  useEffect(() => {
+    let active = true;
+    fetch('/api/rates')
+      .then((res) => res.json())
+      .then((data: FxRateData) => {
+        if (active && data.satsPerXOF) {
+          setFxRate(data);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
     };
-  };
+  }, []);
 
   const handleVoiceToggle = async () => {
     if (!isRecording && (voiceState === 'idle' || voiceState === 'error')) {
@@ -58,6 +82,7 @@ export default function MerchantTerminal() {
 
     if (isRecording) {
       setVoiceState('processing');
+      setProcessingStep('Whisper ASR...');
       const audioBlob = await stopRecording();
 
       if (!audioBlob) {
@@ -71,23 +96,48 @@ export default function MerchantTerminal() {
         formData.append('audio', audioBlob);
         formData.append('lang', lang);
 
-        const response = await fetch('/api/transcribe', {
+        const transcribeRes = await fetch('/api/transcribe', {
           method: 'POST',
           body: formData,
         });
 
-        const data = await response.json();
-
-        if (!response.ok || !data.transcript) {
-          throw new Error(data.error || 'Transcription failed');
+        const transcribeData = await transcribeRes.json();
+        if (!transcribeRes.ok || !transcribeData.transcript) {
+          throw new Error(transcribeData.error || 'Transcription failed');
         }
 
-        const parsed = extractQuickPreview(data.transcript);
-        setTransaction(parsed);
+        setProcessingStep('AI Agent...');
+        const parseRes = await fetch('/api/parse-intent', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            transcript: transcribeData.transcript,
+            lang,
+          }),
+        });
+
+        const parsedData = await parseRes.json();
+        if (!parseRes.ok) {
+          throw new Error(parsedData.error || 'Intent parsing failed');
+        }
+
+        const amountXOF = typeof parsedData.amountXOF === 'number' ? parsedData.amountXOF : 0;
+
+        setTransaction({
+          item: parsedData.item,
+          quantity: parsedData.quantity || 1,
+          amountXOF,
+          amountSats: convertXofToSats(amountXOF),
+          rawTranscript: transcribeData.transcript,
+          confidence: parsedData.confidence,
+          timestamp: Date.now(),
+        });
+
+        setIsEditingAmount(false);
         setVoiceState('ready');
         soundEffects.playSuccess();
       } catch (err) {
-        const msg = err instanceof Error ? err.message : 'Network error during transcription';
+        const msg = err instanceof Error ? err.message : 'Network error during AI processing';
         setStatusMessage(msg);
         setVoiceState('error');
         soundEffects.playCancel();
@@ -99,6 +149,7 @@ export default function MerchantTerminal() {
     soundEffects.playCancel();
     setTransaction(null);
     setStatusMessage(null);
+    setIsEditingAmount(false);
     clearError();
     setVoiceState('idle');
   };
@@ -107,12 +158,40 @@ export default function MerchantTerminal() {
     soundEffects.playMicStart();
     setTransaction({
       item: itemLabel,
+      quantity: 1,
       amountXOF: amount,
-      amountSats: Math.round(amount * FCFA_TO_SATS_RATE),
+      amountSats: convertXofToSats(amount),
+      confidence: 'high',
       timestamp: Date.now(),
     });
+    setIsEditingAmount(false);
     setVoiceState('ready');
     soundEffects.playSuccess();
+  };
+
+  const setCardAmount = (validXOF: number) => {
+    if (!transaction) return;
+    setTransaction({
+      ...transaction,
+      amountXOF: validXOF,
+      amountSats: convertXofToSats(validXOF),
+      confidence: validXOF > 0 ? 'high' : transaction.confidence,
+    });
+    setIsEditingAmount(false);
+    soundEffects.playSuccess();
+  };
+
+  const startAmountEdit = () => {
+    if (!transaction) return;
+    setEditAmountInput(transaction.amountXOF > 0 ? String(transaction.amountXOF) : '');
+    setIsEditingAmount(true);
+  };
+
+  const saveAmountEdit = () => {
+    if (!transaction) return;
+    const numeric = parseInt(editAmountInput.replace(/\D/g, ''), 10);
+    const validXOF = numeric && numeric > 0 ? Math.min(numeric, 10_000_000) : transaction.amountXOF;
+    setCardAmount(validXOF);
   };
 
   const activeError = statusMessage || micError;
@@ -139,15 +218,15 @@ export default function MerchantTerminal() {
         <LanguageSelector currentLang={lang} onSelect={setLang} />
       </header>
 
-      {/* Network & Node Pill */}
+      {/* Live Oracle & Lightning Status Bar */}
       <div className="w-full flex items-center justify-between px-3 py-1.5 rounded-lg bg-slate-900/60 border border-slate-800/80 my-3">
-        <div className="flex items-center gap-1.5 text-xs text-slate-400">
+        <div className="flex items-center gap-1.5 text-[11px] text-slate-300 font-mono">
           <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-          <span>Lightning Network</span>
+          <span>1k F ≈ {Math.round(1000 * satsPerXOF).toLocaleString()} sats</span>
         </div>
         <div className="text-[11px] font-mono text-amber-400 flex items-center gap-1">
           <Wifi className="w-3 h-3" />
-          <span>Mutinynet 0-Fee</span>
+          <span>{fxRate ? fxRate.source : 'Syncing FX...'}</span>
         </div>
       </div>
 
@@ -165,7 +244,7 @@ export default function MerchantTerminal() {
                   : voiceState === 'listening'
                   ? t.listening
                   : voiceState === 'processing'
-                  ? t.processing
+                  ? `${t.processing} (${processingStep})`
                   : t.tapToSpeak
               }
             />
@@ -187,15 +266,30 @@ export default function MerchantTerminal() {
           /* Parsed Bill Card (Tactile High-Contrast) */
           <div className="w-full bg-slate-900 border-2 border-amber-500/60 rounded-3xl p-5 shadow-2xl shadow-amber-500/10 space-y-4 animate-in fade-in zoom-in-95 duration-200">
             <div className="flex justify-between items-start border-b border-slate-800 pb-3">
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2.5 min-w-0">
                 <ShoppingBag className="w-5 h-5 text-amber-500 shrink-0" />
-                <span className="font-bold text-slate-200 text-sm line-clamp-1">
-                  {transaction.item}
-                </span>
+                <div className="min-w-0">
+                  <div className="flex items-center gap-1.5">
+                    {transaction.quantity > 1 && (
+                      <span className="px-1.5 py-0.5 rounded-md bg-amber-500 text-slate-950 font-mono font-black text-xs shrink-0">
+                        {transaction.quantity}×
+                      </span>
+                    )}
+                    <span className="font-bold text-slate-100 text-sm truncate">
+                      {transaction.item}
+                    </span>
+                  </div>
+                  {transaction.confidence && (
+                    <span className="text-[10px] text-emerald-400 flex items-center gap-1 font-mono mt-0.5">
+                      <Sparkles className="w-2.5 h-2.5" />
+                      AI Parsed • {transaction.confidence.toUpperCase()}
+                    </span>
+                  )}
+                </div>
               </div>
               <button
                 onClick={handleReset}
-                className="p-1.5 text-slate-400 hover:text-slate-200 rounded-lg bg-slate-800"
+                className="p-1.5 text-slate-400 hover:text-slate-200 rounded-lg bg-slate-800 shrink-0"
                 title={t.cancel}
               >
                 <RefreshCw className="w-4 h-4" />
@@ -212,29 +306,88 @@ export default function MerchantTerminal() {
               </div>
             )}
 
-            {/* Huge Amount Visual for Sandaga Outdoor Sunlight */}
+            {/* Huge Amount Visual + 1-Tap Override */}
             <div className="text-center py-1">
               <p className="text-xs uppercase tracking-wider text-slate-400 font-semibold mb-1">
                 {t.amountDue}
               </p>
-              <div className="text-4xl font-black text-white tracking-tight">
-                {transaction.amountXOF.toLocaleString()}{' '}
-                <span className="text-amber-500 text-2xl font-bold">{t.currency}</span>
-              </div>
-              <div className="inline-flex items-center gap-1.5 px-3 py-1 mt-2 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-400 text-xs font-mono font-bold">
-                <Zap className="w-3.5 h-3.5 fill-amber-400" />
-                <span>≈ {transaction.amountSats.toLocaleString()} Sats</span>
-              </div>
+
+              {isEditingAmount ? (
+                <div className="flex items-center justify-center gap-2 my-1">
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    placeholder="3500"
+                    value={editAmountInput}
+                    onChange={(e) => setEditAmountInput(e.target.value.replace(/\D/g, ''))}
+                    onKeyDown={(e) => e.key === 'Enter' && saveAmountEdit()}
+                    autoFocus
+                    className="w-40 px-3 py-2 text-center text-2xl font-black bg-slate-950 border-2 border-amber-500 rounded-xl text-white focus:outline-none"
+                  />
+                  <button
+                    onClick={saveAmountEdit}
+                    className="p-3 rounded-xl bg-emerald-500 text-slate-950 font-bold active:scale-95"
+                    aria-label="Confirm amount"
+                  >
+                    <Check className="w-5 h-5" />
+                  </button>
+                </div>
+              ) : (
+                <div className="inline-flex items-center justify-center gap-2">
+                  <div
+                    onClick={startAmountEdit}
+                    className={`text-4xl font-black tracking-tight cursor-pointer ${
+                      transaction.amountXOF > 0 ? 'text-white' : 'text-slate-500'
+                    }`}
+                  >
+                    {transaction.amountXOF.toLocaleString()}{' '}
+                    <span className="text-amber-500 text-2xl font-bold">{t.currency}</span>
+                  </div>
+                  <button
+                    onClick={startAmountEdit}
+                    className="p-1.5 rounded-lg bg-slate-800/90 hover:bg-slate-700 text-slate-300"
+                    title="Edit amount"
+                  >
+                    <Pencil className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              )}
+
+              {/* If no price was spoken, offer clean 1-tap amount chips instead of a fake 1000 */}
+              {transaction.amountXOF === 0 && !isEditingAmount ? (
+                <div className="mt-2 space-y-2">
+                  <p className="text-[11px] text-amber-300/90">{t.noAmountHint}</p>
+                  <div className="flex justify-center gap-1.5 flex-wrap">
+                    {[500, 1000, 2500, 5000].map((chip) => (
+                      <button
+                        key={chip}
+                        onClick={() => setCardAmount(chip)}
+                        className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-amber-500 hover:text-slate-950 text-amber-400 font-mono text-xs font-bold transition-colors"
+                      >
+                        {chip.toLocaleString()} F
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <div className="block">
+                  <div className="inline-flex items-center gap-1.5 px-3 py-1 mt-2 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-400 text-xs font-mono font-bold">
+                    <Zap className="w-3.5 h-3.5 fill-amber-400" />
+                    <span>≈ {transaction.amountSats.toLocaleString()} Sats</span>
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Action Button */}
             <button
+              disabled={transaction.amountXOF <= 0}
               onClick={() =>
                 alert(
-                  `Phase 4 will use LLaMA-3.3-70B structured parsing + live BTC/XOF rate, and Phase 5 will generate the real Lightning Invoice!`
+                  `Phase 5 will generate a real Bolt11 Lightning Invoice for ${transaction.amountSats.toLocaleString()} Sats and verify payment via Nostr!`
                 )
               }
-              className="w-full py-4 rounded-2xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-base flex items-center justify-center gap-2 shadow-lg shadow-amber-500/30 transition-transform active:scale-95"
+              className="w-full py-4 rounded-2xl bg-amber-500 hover:bg-amber-400 disabled:bg-slate-800 disabled:text-slate-500 text-slate-950 font-black text-base flex items-center justify-center gap-2 shadow-lg shadow-amber-500/30 disabled:shadow-none transition-transform active:scale-95"
             >
               <span>{t.generateInvoice}</span>
               <ArrowRight className="w-5 h-5" />

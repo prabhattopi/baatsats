@@ -58,17 +58,23 @@ export async function POST(request: Request) {
     groqForm.append('response_format', 'verbose_json');
     groqForm.append('temperature', '0');
 
-    if (lang === 'en') {
+   if (lang === 'en') {
       groqForm.append('language', 'en');
       groqForm.append(
         'prompt',
         'Dakar Sandaga market merchant sale: FCFA, francs, sats, bitcoin, bags of rice, fabric, 500, 1000, 3500, 4500.'
       );
+    } else if (lang === 'wo') {
+      groqForm.append('language', 'fr');
+      groqForm.append(
+        'prompt',
+        'Jaaykat ci Marché Sandaga Dakar (Wolof ak Français): Jaay naa benn, ñaari tééré, ñetti junni ak juróomi tééméér FCFA. Ceeb, thiéboudienne, attaya, dibi, mango, xaalis, fey, fukk, tééméér, junni, 500, 1000, 2000, 3500, 5000 francs.'
+      );
     } else {
       groqForm.append('language', 'fr');
       groqForm.append(
         'prompt',
-        'Transaction commerciale au Marché Sandaga à Dakar (Wolof et Français): Vendu deux tissus pour trois mille cinq cents FCFA. Jaay naa ñaari tééré ñetti junni ak juróomi tééméér FCFA. Thiéboudienne, attaya, dibi, sats, bitcoin, fey, 500, 1000, 2000, 5000.'
+        'Transaction commerciale au Marché Sandaga à Dakar: Vendu deux tissus pour trois mille cinq cents FCFA. Thiéboudienne, attaya, dibi, sac de riz, sats, bitcoin, 500, 1000, 2000, 3500, 5000 francs.'
       );
     }
 
