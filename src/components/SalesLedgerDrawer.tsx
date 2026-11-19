@@ -8,9 +8,11 @@ import {
   ExternalLink,
   Clock,
   RefreshCw,
+  Database,
 } from 'lucide-react';
 import type { SettledReceipt, TranslationDictionary } from '@/types/pos';
-import { buildMicroLoanCreditPassport } from '@/utils/salesLedger';
+import { buildMicroLoanCreditPassport, saveReceiptToLedger } from '@/utils/salesLedger';
+import { getOrCreateMerchantNostrIdentity } from '@/utils/nostrReceipt';
 import { soundEffects } from '@/utils/audioFeedback';
 
 interface Props {
@@ -19,6 +21,7 @@ interface Props {
   t: TranslationDictionary;
   onClose: () => void;
   onSyncNow: () => void;
+  onSeedComplete: () => void;
   isSyncing: boolean;
 }
 
@@ -28,11 +31,63 @@ export default function SalesLedgerDrawer({
   t,
   onClose,
   onSyncNow,
+  onSeedComplete,
   isSyncing,
 }: Props) {
   const totalSats = receipts.reduce((sum, r) => sum + r.amountSats, 0);
   const totalXOF = receipts.reduce((sum, r) => sum + r.amountXOF, 0);
   const pendingCount = receipts.filter((r) => r.syncStatus === 'offline-queued').length;
+
+  const handleLoadSeedData = async () => {
+    soundEffects.playMicStart();
+    const identity = getOrCreateMerchantNostrIdentity();
+    const now = Date.now();
+
+    const sampleSales: SettledReceipt[] = [
+      {
+        id: 'seed_sandaga_01',
+        item: 'Tééré Thioup',
+        quantity: 2,
+        amountXOF: 3500,
+        amountSats: 9085,
+        lightningAddress: 'hello@getalby.com',
+        nostrPubkey: identity.npub,
+        relaysPublished: 0,
+        syncStatus: 'offline-queued',
+        settledAt: now - 3600 * 1000 * 3,
+      },
+      {
+        id: 'seed_sandaga_02',
+        item: 'Thiéboudienne',
+        quantity: 1,
+        amountXOF: 1500,
+        amountSats: 3890,
+        lightningAddress: 'hello@getalby.com',
+        nostrPubkey: identity.npub,
+        relaysPublished: 0,
+        syncStatus: 'offline-queued',
+        settledAt: now - 3600 * 1000 * 1.5,
+      },
+      {
+        id: 'seed_sandaga_03',
+        item: 'Attaya / Thé',
+        quantity: 3,
+        amountXOF: 500,
+        amountSats: 1295,
+        lightningAddress: 'hello@getalby.com',
+        nostrPubkey: identity.npub,
+        relaysPublished: 0,
+        syncStatus: 'offline-queued',
+        settledAt: now - 600 * 1000,
+      },
+    ];
+
+    for (const sale of sampleSales) {
+      await saveReceiptToLedger(sale);
+    }
+    soundEffects.playSuccess();
+    onSeedComplete();
+  };
 
   const handleDownloadPassport = () => {
     soundEffects.playSuccess();
@@ -109,12 +164,12 @@ export default function SalesLedgerDrawer({
           )}
         </div>
 
-        {/* Offline Sync Banner if any queued receipts exist */}
+        {/* Offline Sync Banner */}
         {pendingCount > 0 && (
           <div className="px-3 py-2 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-between text-xs shrink-0">
             <span className="text-amber-300 flex items-center gap-1.5">
               <Clock className="w-3.5 h-3.5" />
-              {pendingCount} offline receipt(s) pending sync
+              {pendingCount} offline receipt(s) queued
             </span>
             <button
               onClick={onSyncNow}
@@ -130,8 +185,17 @@ export default function SalesLedgerDrawer({
         {/* Scrollable Receipt List */}
         <div className="flex-1 overflow-y-auto space-y-2 pr-1">
           {receipts.length === 0 ? (
-            <div className="text-center py-8 text-xs text-slate-500">
-              No settled transactions yet. Complete a voice sale to build your Nostr credit ledger.
+            <div className="text-center py-6 space-y-3">
+              <p className="text-xs text-slate-400">
+                No settled transactions yet. Complete a voice sale or load sample Sandaga Market data:
+              </p>
+              <button
+                onClick={handleLoadSeedData}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-bold text-amber-400"
+              >
+                <Database className="w-3.5 h-3.5" />
+                <span>Load Dakar Market Seed Data</span>
+              </button>
             </div>
           ) : (
             receipts.map((item) => (

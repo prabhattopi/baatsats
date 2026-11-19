@@ -657,6 +657,7 @@ export default function MerchantTerminal() {
           t={t}
           onClose={() => setShowLedger(false)}
           onSyncNow={handleSyncOfflineQueue}
+          onSeedComplete={refreshLedger}
           isSyncing={isSyncingLedger}
         />
       )}
